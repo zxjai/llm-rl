@@ -13,11 +13,15 @@ Usually we will use `srun` for interactive development. To pull up docs `srun -h
 
 ```bash
 # for minimal weight transfer test
-srun --nodes=2 --gres=gpu:h100:1 --cpus-per-task=8 --mem=80G --time=03:00:00 --pty bash
+srun --nodes=2 --gres=gpu:h100:1 --cpus-per-task=8 --mem=80G --time=00:30:00 --pty bash
+
+srun --partition=ood --nodes=1 --gres=gpu:t4:2 --cpus-per-task=2 --mem=30G --time=00:30:00 --pty bash
+
 
 # test ray cluster
 srun --nodes=1 --cpus-per-task=8 --mem=30G --time=00:10:00 --pty bash
 ```
+
 
 ## Ray Examples
 
