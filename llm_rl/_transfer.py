@@ -1,25 +1,19 @@
 import asyncio
-import os
-import pickle
 import uuid
 from dataclasses import asdict
+from pathlib import Path
 
 import ray
 import torch
 import vllm
-from transformers import AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer
 from vllm import SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.base import (
-    WeightTransferInitRequest,
-    WeightTransferUpdateRequest,
-)
+from vllm.distributed.weight_transfer.base import (WeightTransferInitRequest,
+                                                   WeightTransferUpdateRequest)
 from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
-    NCCLWeightTransferInitInfo,
-    NCCLWeightTransferUpdateInfo,
-)
+    NCCLTrainerSendWeightsArgs, NCCLWeightTransferEngine,
+    NCCLWeightTransferInitInfo, NCCLWeightTransferUpdateInfo)
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
 
@@ -30,27 +24,31 @@ class RolloutWorker(vllm.AsyncLLMEngine):
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
         super().__init__(
-            vllm_config=vllm_config,
+            vllm_config=vllm_config, 
             executor_class=executor_class,
             log_requests=True,
-            log_stats=True,
+            log_stats=True
         )
         self.max_tokens = max_tokens
+
         self._request_pause_flag = False
         self._generation_paused = False
 
-    async def do_generate(self, prompt_token_ids, sampling_params):
+    async def do_generate(
+        self, prompt_token_ids: list[int], sampling_params: vllm.SamplingParams
+    ) -> tuple[vllm.RequestOutput, int]:
+        """
+        Single rollout. Returns output and an index specifying number of tokens
+        generated prior to weight update if weighted changed, else -1.
+        """ 
         pause_token_index = -1
         previous_token_count = 0
-        output = None
         async for request_output in self.generate(
-            {"prompt_token_ids": prompt_token_ids},
+            {'prompt_token_ids': prompt_token_ids},
             sampling_params,
-            request_id=str(uuid.uuid4()),
+            request_id=str(uuid.uuid4())
         ):
             output = request_output
-            if not output.outputs:
-                continue
             current_token_count = len(output.outputs[0].token_ids)
             if (
                 current_token_count >= self.max_tokens
@@ -63,17 +61,89 @@ class RolloutWorker(vllm.AsyncLLMEngine):
         return output, pause_token_index
 
     async def pause_after_n_tokens(self):
+        """
+        Wait for a request to set pause flag, then pause.
+        """
         while not self._request_pause_flag:
-            await asyncio.sleep(0.01)
-        await super().pause_generation(mode="keep")
+            await asyncio.sleep(0)
+        await super().pause_generation(mode='keep')
         await asyncio.sleep(5)
         self._generation_paused = True
+
+# @ray.remote(num_gpus=1)
+# class Trainer:
+#     def __init__(self, model_path: str):
+#         from vllm.model_executor.layers.batch_invariant import \
+#             init_batch_invariance
+#         from vllm.v1.attention.backends.registry import AttentionBackendEnum
+#         init_batch_invariance(AttentionBackendEnum.FLASH_ATTN)
+
+#         # model
+#         self.model = AutoModelForCausalLM.from_pretrained(
+#             model_path, dtype=torch.bfloat16
+#         ).to('cuda:0')
+
+#         self.port = get_open_port()
+#         self.master_address = get_ip()
+
+#     def get_master_address_and_port(self):
+#         return self.master_address, self.port
+
+#     def get_weight_metadata(self):
+#         """
+#         Metadata conssits of weight name, dtype, shapes
+#         """
+#         names = []
+#         dtype_names = []
+#         shapes = []
+#         for name, p in self.model.named_parameters():
+#             names.append(name)
+#             dtype_names.append(str(p.dtype).split('.')[-1])
+#             shapes.append(list(p.shape))
+#         return names, dtype_names, shapes
+
+#     def init_weight_transfer_group(self, world_size: int):
+#         self.model_update_group = NCCLWeightTransferEngine.trainer_init(
+#             dict(
+#                 master_address=self.master_address,
+#                 master_port=self.port,
+#                 world_size=world_size
+#             )
+#         )
+    
+#     def broadcast_weights(self, packed: bool = True):
+#         trainer_args = NCCLTrainerSendWeightsArgs(
+#             group=self.model_update_group,
+#             packed=packed
+#         )
+
+#         NCCLWeightTransferEngine.trainer_send_weights(
+#             iterator=self.model.named_parameters(),
+#             trainer_args=trainer_args
+#         )
+
+#     @torch.inference_mode()
+#     def generate(self, token_ids: list[int], max_new_tokens: int) -> list[int]:
+#         input_ids = torch.tensor([token_ids], device='cuda:0')
+#         output = self.model.generate(
+#             input_ids,
+#             max_new_tokens=max_new_tokens,
+#             do_sample=False
+#         )
+#         new_token_ids = output[0, len(token_ids) :].tolist()
+#         return new_token_ids
+
 
 
 @ray.remote(num_gpus=1)
 class Trainer:
-    def __init__(self, vllm_param_spec, seed: int = 0):
+    def __init__(self, vllm_param_spec: list[tuple[str, list[int], str]], seed: int = 0):
+        """
+        vllm_param_spec: list of (name, shape, dtype_name) tuples describing
+        vLLM's parameter layout. We fabricate tensors matching that spec.
+        """
         torch.manual_seed(seed)
+
         dtype_map = {
             "bfloat16": torch.bfloat16,
             "float16": torch.float16,
@@ -81,12 +151,14 @@ class Trainer:
             "uint8": torch.uint8,
             "int8": torch.int8,
         }
+
         self.fake_params: dict[str, torch.Tensor] = {}
         for name, shape, dtype_name in vllm_param_spec:
             dtype = dtype_map[dtype_name]
             if dtype.is_floating_point:
                 t = torch.randn(shape, dtype=torch.float32).to(dtype)
             else:
+                # integer / quantized — fill with small random ints
                 t = torch.randint(0, 16, shape, dtype=dtype)
             self.fake_params[name] = t.to("cuda:0")
 
@@ -124,36 +196,31 @@ class Trainer:
         )
 
 
+
 ray_env_vars = {
-    "RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR": "1",
-    "VLLM_BATCH_INVARIANT": "1",
-    # --- diagnostics ---
-    "NCCL_DEBUG": "INFO",
-    "NCCL_DEBUG_SUBSYS": "INIT,NET,GRAPH,P2P",
-    # --- single-node bootstrap over loopback ---
-    "NCCL_SOCKET_IFNAME": "lo",
-    # --- DO NOT set NCCL_CUMEM_ENABLE=0 on NCCL 2.27+; it breaks init ---
-    # --- force SHM transport instead of P2P (was hanging in proxy setup) ---
-    "NCCL_P2P_DISABLE": "1",
+    'RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR': '1',
+    'VLLM_BATCH_INVARIANT': '1'
 }
 
-ray.init(
-    runtime_env={"env_vars": ray_env_vars},
-    _temp_dir=os.path.abspath("ray_tmp"),
-)
+import os 
+ray.init(runtime_env={'env_vars': ray_env_vars}, _temp_dir=os.path.abspath('ray_tmp'))
 
+# trainer = Trainer.remote('models/gptoss_20b')
+
+import pickle
 spec = pickle.load(open("vllm_full_spec.pkl", "rb"))
-trainer = Trainer.remote(spec["params"])
+trainer = Trainer.remote(spec["params"])  # start with just params
 
 llm_kwargs = dict(
-    model="models/gptoss_20b",
+    model='models/gptoss_20b',
     enforce_eager=True,
     max_model_len=8192,
     gpu_memory_utilization=0.75,
-    distributed_executor_backend="ray",
-    attention_backend="FLASH_ATTN",
-    weight_transfer_config=WeightTransferConfig(backend="nccl"),
+    distributed_executor_backend='ray',
+    attention_backend='FLASH_ATTN',
+    weight_transfer_config=WeightTransferConfig(backend='nccl')
 )
+
 llm = ray.remote(num_cpus=0, num_gpus=0)(RolloutWorker).remote(**llm_kwargs)
 
 PROMPTS = [
@@ -162,14 +229,12 @@ PROMPTS = [
     "The largest ocean on Earth is",
 ]
 
-tokenizer = AutoTokenizer.from_pretrained("models/gptoss_20b")
+tokenizer = AutoTokenizer.from_pretrained('models/gptoss_20b')
 batch_prompt_token_ids = [
-    tokenizer.encode(p, add_special_tokens=False) for p in PROMPTS
+    tokenizer.encode(prompt, add_special_tokens=False) for prompt in PROMPTS
 ]
 
 master_address, master_port = ray.get(trainer.get_master_address_and_port.remote())
-print(f"[main] trainer rendezvous = {master_address}:{master_port}", flush=True)
-
 world_size = 2
 inference_handle = llm.init_weight_transfer_engine.remote(
     WeightTransferInitRequest(
@@ -178,16 +243,14 @@ inference_handle = llm.init_weight_transfer_engine.remote(
                 master_address=master_address,
                 master_port=master_port,
                 rank_offset=1,
-                world_size=world_size,
+                world_size=world_size
             )
         )
     )
 )
 train_handle = trainer.init_weight_transfer_group.remote(world_size)
-
-print("[main] waiting on NCCL weight-transfer init…", flush=True)
 ray.get([train_handle, inference_handle])
-print("[main] NCCL weight-transfer init complete.", flush=True)
+
 
 names, dtype_names, shapes = ray.get(trainer.get_weight_metadata.remote())
 
@@ -197,7 +260,9 @@ for p in PROMPTS:
     print(f"  - {p!r}")
 print(f"{'=' * 50}")
 
-sampling_params = SamplingParams(temperature=0, max_tokens=110)
+sampling_params = SamplingParams(
+    temperature=0, max_tokens=110
+)
 
 gen_futures = [
     llm.do_generate.remote(ptids, sampling_params) for ptids in batch_prompt_token_ids
@@ -232,12 +297,26 @@ for i, (output, pause_idx) in enumerate(results):
     n_after = len(all_token_ids) - pause_idx
     print(f"    New weights ({n_after} tokens): {after_text!r}")
 
+
 ray.get(llm.shutdown.remote())
 ray.kill(llm)
 ray.kill(trainer)
 
 
+# if __name__ == '__main__':
+#     from transformers import AutoModelForCausalLM, AutoTokenizer
+#     import torch
+#     model_path = 'models/gptoss_20b'
+#     model = AutoModelForCausalLM.from_pretrained(
+#                 model_path, dtype=torch.bfloat16
+#             ).to('cuda:0')
 
 
+#     print('#'*50 + 'Huggingface'+'#'*50)
 
+#     for n, p in model.named_parameters():
+#         print(n, p.shape)
 
+#     print('-'*100)
+#     for n, b in model.named_buffers():
+#         print(n, b.shape)

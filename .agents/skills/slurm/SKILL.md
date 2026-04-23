@@ -13,7 +13,7 @@ Usually we will use `srun` for interactive development. To pull up docs `srun -h
 
 ```bash
 # for minimal weight transfer test
-srun --gres=gpu:h100:2 --cpus-per-task=8 --mem=80G --time=01:00:00 --pty bash
+srun --nodes=2 --gres=gpu:h100:1 --cpus-per-task=8 --mem=80G --time=03:00:00 --pty bash
 
 # test ray cluster
 srun --nodes=1 --cpus-per-task=8 --mem=30G --time=00:10:00 --pty bash
@@ -31,4 +31,5 @@ uv run ray start --address='IP:6379'
 # CPU nodes have alias like c123 while GPU nodes have alias like g123
 # This is run on the login node
 ssh -N -L 8265:localhost:8265 $USER@c123
+ssh -N -L 8265:localhost:8265 $USER@g9
 ```

@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "accelerate>=1.13.0",
     "ray[default,serve]>=2.55.1",
+    "safetensors>=0.7.0",
     "vllm>=0.19.1",
 ]
 [build-system]

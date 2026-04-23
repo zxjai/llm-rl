@@ -1330,6 +1330,7 @@ source = { editable = "." }
 dependencies = [
     { name = "accelerate" },
     { name = "ray", extra = ["default", "serve"] },
+    { name = "safetensors" },
     { name = "vllm" },
 ]
 
@@ -1343,6 +1344,7 @@ dev = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.13.0" },
     { name = "ray", extras = ["default", "serve"], specifier = ">=2.55.1" },
+    { name = "safetensors", specifier = ">=0.7.0" },
     { name = "vllm", specifier = ">=0.19.1" },
 ]
 
