@@ -1,5 +1,28 @@
 # Apptainer
 
+## Build a container
+
+```bash
+srun --cpus-per-task=3 --mem=30G --time=02:00:00 --pty bash
+
+docker_tag=rocm/primus:v26.2
+sif_name=primus
+SANDBOX_SAVE_DIR=./sandbox
+
+
+module load apptainer/1.4.5
+cd $SLURM_TMPDIR
+export APPTAINER_CACHEDIR=$SLURM_TMPDIR/.apptainer_cache
+export APPTAINER_TMPDIR=$SLURM_TMPDIR/.apptainer_tmp
+mkdir -p "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR"
+apptainer pull ${sif_name}.sif docker://${docker_tag}
+
+mkdir -p "$SANDBOX_SAVE_DIR"
+mv ${sif_name}.sif "$SANDBOX_SAVE_DIR/"
+ls "$SANDBOX_SAVE_DIR"
+```
+
+## Useful commands
 
 ```bash 
 # check existing versions
